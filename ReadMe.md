@@ -34,7 +34,7 @@ Realistically, the RAG systems here should never need more than 2-3 rows of data
 
 # Results
 
-Currently, Equipade's backend achieves an accuracy score of 95.% when using gpt-4o as the LLM. An OpenAI RAG using File Search (through chatgpt assistants) and gpt-4o scores at 70.%. We hope to have metrics on other systems like google gemini with vertex ai soon.
+Currently, Equipade's backend achieves an accuracy of 95.70% when using gpt-4o as the LLM. An OpenAI RAG using File Search and gpt-4o achieves an accuracy of 70.66%. We hope to have metrics on other systems like google gemini with vertex ai soon.
 
 # Extra information
 
