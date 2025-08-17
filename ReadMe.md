@@ -18,8 +18,6 @@ In order to address these pain points, we first needed a way to test our solutio
 
 The benchmark esentially asks a bunch of questions (which can be seen in the data/input_data.csv file) about a vehicle with a given VIN number. This VIN number can always be mapped to a vehicle model through the vin_table.csv. The BOM includes information on all components, and which models include those components. The questions asked are about components, so the RAG system will need to retrieve the correct information to understand what vehicle model we are working with, and what component we are talking about, since multiple components might have similar names. Identifying the correct model is essential for identifying the correct component and providing the right answer.
 
-*diagram*
-
 # Testing rules
 
 In order to test a RAG system effectively, certain data ingestion and data retrieval rules were applied.
