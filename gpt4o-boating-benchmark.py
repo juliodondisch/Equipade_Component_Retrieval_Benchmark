@@ -66,21 +66,45 @@ def llm_judge(actual_answer, expected_answer, retries: int = 3):
         Return only: {{"correct": true/false, "reason": "found/not found"}}
         """
 
-    # Use a cheap model for judging (route through hybrid agent to keep pipeline consistent)
-    result = _http_post_json_with_retries(
-        "/boating_benchmark_agent_hybrid/v1/chat/completions",
-        {
-            "model": "gpt-3.5-turbo",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": judge_prompt}
-            ],
-            "max_tokens": 50,
-            "temperature": 0.0
-        },
-        retries=retries,
-        base_sleep=1.0,
-    )
+    # Direct call to OpenAI API
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is required")
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    payload = {
+        "model": "gpt-3.5-turbo",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": judge_prompt}
+        ],
+        "max_tokens": 50,
+        "temperature": 0.0
+    }
+    
+    last_err = None
+    for attempt in range(retries):
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            break
+        except Exception as e:
+            last_err = e
+            # exponential backoff
+            time.sleep(1.0 * (2 ** attempt))
+    else:
+        # If all retries exhausted, raise last error
+        raise last_err if last_err else RuntimeError("Unknown API error")
     
     try:
         # Extract the JSON from the response
@@ -134,15 +158,16 @@ BOATING_BENCHMARK_SYSTEM_PROMPT = (
 
 
 def _init_openai_client() -> OpenAI:
-    api_key = os.getenv("GPT5_BENCHMARK_OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("GPT5_BENCHMARK_OPENAI_API_KEY not set")
+        raise RuntimeError("OPENAI_API_KEY not set")
     return OpenAI(api_key=api_key)
 
 
 def reset_vector_stores_and_files(client: OpenAI):
     # Delete vector stores
     try:
+        print("Deleting old vector stores...")
         vs_list = client.vector_stores.list()
         for vs in getattr(vs_list, "data", []) or []:
             try:
@@ -153,6 +178,7 @@ def reset_vector_stores_and_files(client: OpenAI):
         pass
     # Delete all files
     try:
+        print("Deleting old files...")
         files = client.files.list()
         for f in getattr(files, "data", []) or []:
             try:
@@ -164,7 +190,9 @@ def reset_vector_stores_and_files(client: OpenAI):
 
 
 def create_vector_store_with_files(client: OpenAI, file_paths: list) -> str:
+    print("Creating new vector store...")
     store = client.vector_stores.create(name=f"boating_benchmark_{datetime.utcnow().isoformat()}Z")
+    print("Uploading files to vector store...")
     for path in file_paths:
         with open(path, "rb") as fh:
             up = client.files.create(file=fh, purpose="assistants")
@@ -281,18 +309,19 @@ def ask_openai_gpt4o(client: OpenAI, question: str, vector_store_id: str):
     resp = client.responses.create(
         model="gpt-4o",
         input=[
-            {"role": "system", "content": BOATING_BENCHMARK_SYSTEM_PROMPT + "\n\nYou have access to a file_search tool connected to two CSV-derived TXT files. Always use file_search to answer. Retrieve the smallest number of snippets necessary (<=3) and prefer the most relevant rows only."},
+            {"role": "system", "content": BOATING_BENCHMARK_SYSTEM_PROMPT + "\n\nYou have access to a file_search tool connected to two CSV-derived TXT files. Always use file_search to answer. Retrieve the smallest number of snippets necessary (<=5) and prefer the most relevant rows only."},
             {"role": "user", "content": question},
         ],
         tools=[{
             "type": "file_search",
             "vector_store_ids": [vector_store_id],
-            "max_num_results": 4,
+            "max_num_results": 5,
         }],
         tool_choice="auto",
         max_output_tokens=200,
         metadata={"benchmark": "boating"},
     )
+    print(resp)
     # usage tokens
     in_tok = getattr(getattr(resp, "usage", None), "input_tokens", None)
     out_tok = getattr(getattr(resp, "usage", None), "output_tokens", None)
@@ -406,8 +435,17 @@ def main():
     total_questions = len(inputs)
     # OpenAI setup; reset and upload files into a fresh vector store
     client = _init_openai_client()
-    reset_vector_stores_and_files(client)
-    vs_id = create_vector_store_with_files(client, bom_chunk_files + vin_chunk_files)
+    reset = input("Do you want to reset the vector stores and files? Or run with existing vector stores? (y/n)")
+    if reset.upper() == 'Y':
+        reset_vector_stores_and_files(client)
+        vs_id = create_vector_store_with_files(client, bom_chunk_files + vin_chunk_files)
+    else:
+        # Get existing vector store ID
+        vs_list = client.vector_stores.list()
+        vs_data = getattr(vs_list, "data", []) or []
+        if not vs_data:
+            raise RuntimeError("No existing vector stores found. Please create one first or uncomment the reset/create lines above.")
+        vs_id = vs_data[0].id
     
     # Print files.list() and vector store id for confirmation
     files_list = client.files.list()

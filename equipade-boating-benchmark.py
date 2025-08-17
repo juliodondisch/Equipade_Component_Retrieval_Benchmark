@@ -31,6 +31,7 @@ def _http_post_json_with_retries(path: str, payload: dict, retries: int = 3, bas
             conn.request("POST", path, json.dumps(payload), {"Content-Type": "application/json"})
             response = conn.getresponse()
             raw = response.read()
+            print(f"HTTP {response.status} {response.reason}: {raw!r}")
             conn.close()
             if response.status != 200:
                 raise RuntimeError(f"HTTP {response.status} {response.reason}: {raw[:200]!r}")
@@ -51,7 +52,7 @@ def llm_judge(actual_answer, expected_answer, retries: int = 3):
 
     judge_prompt = f"""Expected: "{expected_answer}"
         Actual: "{actual_answer}"
-
+    
         Does the actual answer contain the expected answer? 
 
         Rules:
@@ -63,21 +64,45 @@ def llm_judge(actual_answer, expected_answer, retries: int = 3):
 
         Return only: {{"correct": true/false, "reason": "found/not found"}}"""
 
-    # Use a cheap model for judging (route through hybrid agent to keep pipeline consistent)
-    result = _http_post_json_with_retries(
-        "/boating_benchmark_agent_hybrid/v1/chat/completions",
-        {
-            "model": "gpt-3.5-turbo",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": judge_prompt}
-            ],
-            "max_tokens": 50,
-            "temperature": 0.0
-        },
-        retries=retries,
-        base_sleep=1.0,
-    )
+    # Direct call to OpenAI API
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is required")
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    payload = {
+        "model": "gpt-3.5-turbo",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": judge_prompt}
+        ],
+        "max_tokens": 50,
+        "temperature": 0.0
+    }
+    
+    last_err = None
+    for attempt in range(retries):
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            break
+        except Exception as e:
+            last_err = e
+            # exponential backoff
+            time.sleep(1.0 * (2 ** attempt))
+    else:
+        # If all retries exhausted, raise last error
+        raise last_err if last_err else RuntimeError("Unknown API error")
     
     try:
         # Extract the JSON from the response
@@ -144,67 +169,69 @@ def main():
 
     #### SECTION: Refreshes collection ####
 
-    # BOM collection
-    # # Delete old collection if it exists
-    # conn = http.client.HTTPConnection("localhost:8080")
-    # conn.request("DELETE", "/collections/boating_benchmark_collection_hybrid_bom")
-    # response = conn.getresponse()
-    # print("Delete response:", response.read().decode())
-    # conn.close()
+    refresh = input("Do you want to refresh the collection? (y/n)")
 
-    # # Create collection (hybrid)
-    # conn = http.client.HTTPConnection("localhost:8080")
-    # conn.request("POST", "/collections", json.dumps({
-    #     "name": "boating_benchmark_collection_hybrid_bom",
-    #     "dimension": 1536
-    # }), {"Content-Type": "application/json"})
-    # response = conn.getresponse()
-    # print("Create collection response:", response.read().decode())
-    # conn.close()
+    if refresh.upper() == 'Y':
+        # Delete old collection if it exists
+        conn = http.client.HTTPConnection("localhost:8080")
+        conn.request("DELETE", "/collections/boating_benchmark_collection_hybrid_bom")
+        response = conn.getresponse()
+        print("Delete response:", response.read().decode())
+        conn.close()
 
-    # # Add BOM table (hybrid insert)
-    # conn = http.client.HTTPConnection("localhost:8080")
-    # conn.request("POST", "/collections/boating_benchmark_collection_hybrid_bom/documents/hybrid", json.dumps({
-    #     "type": "table",
-    #     "columnNames": bom_columns,
-    #     "rows": bom_rows,
-    #     "chunkSize": 200,
-    #     "overlap": 50
-    # }), {"Content-Type": "application/json"})
-    # response = conn.getresponse()
-    # print("BOM table response:", response.read().decode())
-    # conn.close()
+        # Create collection (hybrid)
+        conn = http.client.HTTPConnection("localhost:8080")
+        conn.request("POST", "/collections", json.dumps({
+            "name": "boating_benchmark_collection_hybrid_bom",
+            "dimension": 1536
+        }), {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        print("Create collection response:", response.read().decode())
+        conn.close()
 
-    # ## VIN collection
-    # # Delete old collection if it exists
-    # conn = http.client.HTTPConnection("localhost:8080")
-    # conn.request("DELETE", "/collections/boating_benchmark_collection_hybrid_vin")
-    # response = conn.getresponse()
-    # print("Delete response:", response.read().decode())
-    # conn.close()
+        # Add BOM table (hybrid insert)
+        conn = http.client.HTTPConnection("localhost:8080")
+        conn.request("POST", "/collections/boating_benchmark_collection_hybrid_bom/documents/hybrid", json.dumps({
+            "type": "table",
+            "columnNames": bom_columns,
+            "rows": bom_rows,
+            "chunkSize": 200,
+            "overlap": 50
+        }), {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        print("BOM table response:", response.read().decode())
+        conn.close()
 
-    # # Create collection (hybrid)
-    # conn = http.client.HTTPConnection("localhost:8080")
-    # conn.request("POST", "/collections", json.dumps({
-    #     "name": "boating_benchmark_collection_hybrid_vin",
-    #     "dimension": 1536
-    # }), {"Content-Type": "application/json"})
-    # response = conn.getresponse()
-    # print("Create collection response:", response.read().decode())
-    # conn.close()
+        ## VIN collection
+        # Delete old collection if it exists
+        conn = http.client.HTTPConnection("localhost:8080")
+        conn.request("DELETE", "/collections/boating_benchmark_collection_hybrid_vin")
+        response = conn.getresponse()
+        print("Delete response:", response.read().decode())
+        conn.close()
 
-    # # Add VIN table (hybrid insert)
-    # conn = http.client.HTTPConnection("localhost:8080")
-    # conn.request("POST", "/collections/boating_benchmark_collection_hybrid_vin/documents/hybrid", json.dumps({
-    #     "type": "table",
-    #     "columnNames": vin_columns,
-    #     "rows": vin_rows,
-    #     "chunkSize": 200,
-    #     "overlap": 50
-    # }), {"Content-Type": "application/json"})
-    # response = conn.getresponse()
-    # print("VIN table response:", response.read().decode())
-    # conn.close()
+        # Create collection (hybrid)
+        conn = http.client.HTTPConnection("localhost:8080")
+        conn.request("POST", "/collections", json.dumps({
+            "name": "boating_benchmark_collection_hybrid_vin",
+            "dimension": 1536
+        }), {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        print("Create collection response:", response.read().decode())
+        conn.close()
+
+        # Add VIN table (hybrid insert)
+        conn = http.client.HTTPConnection("localhost:8080")
+        conn.request("POST", "/collections/boating_benchmark_collection_hybrid_vin/documents/hybrid", json.dumps({
+            "type": "table",
+            "columnNames": vin_columns,
+            "rows": vin_rows,
+            "chunkSize": 200,
+            "overlap": 50
+        }), {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        print("VIN table response:", response.read().decode())
+        conn.close()
 
     #### SECTION END: Refreshes collection ####
 
@@ -243,11 +270,17 @@ def main():
         max_attempts = 3
         judge_result = {"correct": False, "reason": "not evaluated"}
         actual_answer = ""
+        start_ts = end_ts = None
+        latency_ms = in_tok = out_tok = None
         while attempt < max_attempts:
             try:
+                # Record timestamps and latency
+                start_ts = datetime.now().isoformat() + "Z"
+                t0 = time.time()
+                
                 # Get response from chat completion (hybrid agent)
                 result = _http_post_json_with_retries(
-                    "/boating_benchmark_agent_hybrid/v1/chat/completions-with-retrieved-chunks",
+                    "/boating_benchmark_agent_hybrid/v1/chat/completions",
                     {
                         "model": "gpt-4o",
                         "messages": [{"role": "user", "content": question}],
@@ -257,9 +290,34 @@ def main():
                     retries=3,
                     base_sleep=1.0,
                 )
-                completion = result.get("completion", {})
-                actual_answer = completion.get("choices", [{}])[0].get("message", {}).get("content", "")
-                retrieved_chunks = result.get("retrievedChunks", [])
+                
+                t1 = time.time()
+                end_ts = datetime.now().isoformat() + "Z"
+                latency_ms = int((t1 - t0) * 1000)
+                
+                # Extract token usage (if available)
+                usage = result.get("usage", {})
+                print("Usage:", usage)
+                in_tok = usage.get("prompt_tokens", None)
+                out_tok = usage.get("completion_tokens", None)
+
+                choices = result.get("choices", [])
+                if choices:
+                    # Access the first choice
+                    choice = choices[0]
+                    # Extract the message content
+                    message_content = choice.get("message", {}).get("content", "")
+                    # Parse the message content if it's a JSON string
+                    try:
+                        # Parse the JSON string within the content
+                        message_data = json.loads(message_content)
+                        # Extract the answer from the parsed JSON
+                        actual_answer = message_data.get("answer", "")
+                    except json.JSONDecodeError:
+                        # Fallback to raw content if not JSON
+                        actual_answer = message_content
+                else:
+                    actual_answer = ""
                 print(f"Actual Answer: {actual_answer}")
 
                 # Judge the answer (with internal retries)
@@ -280,7 +338,11 @@ def main():
                         "actual_answer": actual_answer,
                         "judge_result": judge_result,
                         "correct": False,
-                        "status": "failed_after_retries"
+                        "status": "failed_after_retries",
+                        "timestamps": {"start": start_ts, "end": end_ts},
+                        "latency_ms": latency_ms,
+                        "tokens": {"input": in_tok, "output": out_tok},
+                        "retrieved_chunks": [],
                     })
                     # do not advance index so we can resume here
                     print("Hard failure encountered, stopping.")
@@ -293,7 +355,7 @@ def main():
         else:
             print("❌ INCORRECT")
         
-        # Log everything
+        # Log everything, including timestamps, latency, and token usage
         log_entry = {
             "question_number": i+1,
             "question": question,
@@ -301,7 +363,10 @@ def main():
             "actual_answer": actual_answer,
             "judge_result": judge_result,
             "correct": judge_result["correct"],
-            "retrieved_chunks": retrieved_chunks,
+            "timestamps": {"start": start_ts, "end": end_ts},
+            "latency_ms": latency_ms,
+            "tokens": {"input": in_tok, "output": out_tok},
+            "retrieved_chunks": [],  # Left as empty list as requested
         }
         
         print(f"Log Entry: {json.dumps(log_entry, indent=2)}")
